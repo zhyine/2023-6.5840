@@ -1,5 +1,7 @@
 package raft
 
+import "sync"
+
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 type RequestVoteArgs struct {
@@ -28,17 +30,17 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	Debug(dVote, "S%d Receive RequestVote from S%d at T%d.", rf.me, args.CandidateId, rf.currentTerm)
 
-	reply.Term = rf.currentTerm
-
-	// Rules for Servers: All Servers-Rule2
-	rf.checkTerm(args.Term)
-
 	// RequestVote RPC: Receiver implementation-Rule1
 	if args.Term < rf.currentTerm {
 		Debug(dTerm, "S%d Reject the RequestVote from S%d at T%d, since Candidate's term is lower.", rf.me, args.CandidateId, rf.currentTerm)
 		reply.VoteGranted = false
+		reply.Term = rf.currentTerm
 		return
 	}
+
+	// Rules for Servers: All Servers-Rule2
+	rf.checkTerm(args.Term)
+	reply.Term = rf.currentTerm
 
 	// RequestVote RPC: Receiver implementation-Rule2
 	lastLogIndex, lastLogTerm := rf.getLastLogInfo()
@@ -46,8 +48,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		// Raft determines which of tow logs is more up-to-date by comparing the index and term of the last entries in the logs (§5.4)
 		if args.LastLogTerm > lastLogTerm || (args.LastLogTerm == lastLogTerm && args.LastLogIndex >= lastLogIndex) {
 			Debug(dVote, "S%d Grant vote to S%d at T%d.", rf.me, args.CandidateId, rf.currentTerm)
+
 			reply.VoteGranted = true
 			rf.votedFor = args.CandidateId
+
 			Debug(dTerm, "S%d Reset election timeout.", rf.me)
 			rf.setElectionTime()
 		} else {
@@ -114,45 +118,49 @@ func (rf *Raft) startElection() {
 	}
 
 	voteCount := 1
+	var once sync.Once
 
 	for peer := range rf.peers {
 		if peer == rf.me {
 			continue
 		}
-		go rf.candidateSendRequsetVotes(peer, args, &voteCount)
+		go rf.candidateSendRequsetVotes(peer, args, &voteCount, &once)
 	}
 
 }
 
-func (rf *Raft) candidateSendRequsetVotes(server int, args *RequestVoteArgs, voteCount *int) {
+func (rf *Raft) candidateSendRequsetVotes(server int, args *RequestVoteArgs, voteCount *int, once *sync.Once) {
 	reply := &RequestVoteReply{}
 	if rf.sendRequestVote(server, args, reply) {
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
 		Debug(dVote, "S%d Receive request reply from S%d at T%d", rf.me, server, rf.currentTerm)
-		// Rules for Servers: All Servers-Rule2
-		rf.checkTerm(reply.Term)
 
 		if args.Term != rf.currentTerm {
 			Debug(dWarn, "S%d Term has changed after the RequestVote, reply was discarded."+"args.Term: %d, rf.currentTerm: %d", rf.me, args.Term, rf.currentTerm)
 			return
 		}
 
+		// Rules for Servers: All Servers-Rule2
+		rf.checkTerm(reply.Term)
+
 		if reply.VoteGranted {
 			Debug(dVote, "S%d Get a yes vote from S%d at T%d.", rf.me, server, rf.currentTerm)
 			*voteCount++
 			// If votes received from majority of servers: become leader
 			if *voteCount > len(rf.peers)/2 {
-				Debug(dLeader, "S%d Receive majority votes at T%d, become leader.", rf.me, rf.currentTerm)
-				rf.state = LEADER
-				lastLogIndex, _ := rf.getLastLogInfo()
-				for peer := range rf.peers {
-					rf.nextIndex[peer] = lastLogIndex + 1
-					rf.matchIndex[peer] = 0
-				}
-				// Rules for Servers: Leaders-Rule1
-				// Upon election: send initial empty AppendEntries RPCs (heartbeat) to each server
-				rf.sendEntries(true)
+				once.Do(func() {
+					Debug(dLeader, "S%d Receive majority votes at T%d, become leader.", rf.me, rf.currentTerm)
+					rf.state = LEADER
+					lastLogIndex, _ := rf.getLastLogInfo()
+					for peer := range rf.peers {
+						rf.nextIndex[peer] = lastLogIndex + 1
+						rf.matchIndex[peer] = 0
+					}
+					// Rules for Servers: Leaders-Rule1
+					// Upon election: send initial empty AppendEntries RPCs (heartbeat) to each server
+					rf.sendEntries(true)
+				})
 			}
 		} else {
 			Debug(dVote, "S%d Get a reject vote from S%d at T%d.", rf.me, server, rf.currentTerm)

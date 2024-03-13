@@ -96,6 +96,9 @@ type Raft struct {
 	// Volatile state on leaders
 	nextIndex  []int // for each server, index of the next log entry to send that server (initialized to leader last log index + 1)
 	matchIndex []int // for each server, index of highest log entry known to be replicated on server (initialized to 0)
+
+	// 2B
+	applyCh chan ApplyMsg
 }
 
 // return currentTerm and whether this server
@@ -166,14 +169,36 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // if it's ever committed. the second return value is the current
 // term. the third return value is true if this server believes it is
 // the leader.
+
+// All for Servers: Leaders-Rule2
+// If command received from client: append entry to local log, respond after entry applied to state machine
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
 	term := -1
-	isLeader := true
 
 	// Your code here (2B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
-	return index, term, isLeader
+	if rf.state != LEADER {
+		return -1, -1, false
+	}
+
+	logEntry := LogEntry{
+		Command: command,
+		Term:    rf.currentTerm,
+	}
+
+	rf.log = append(rf.log, logEntry)
+
+	index = len(rf.log)
+	term = rf.currentTerm
+
+	Debug(dLog, "S%d Add the command at T%d. lastLogIndex: %d, lastLogTerm: %d.", rf.me, rf.currentTerm, index, term)
+
+	rf.sendEntries(false)
+
+	return index, term, true
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
@@ -224,10 +249,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
-
 	for peer := range rf.peers {
 		rf.nextIndex[peer] = 1
 	}
+
+	rf.applyCh = applyCh
 
 	lastLogIndex, lastLogTerm := rf.getLastLogInfo()
 	Debug(dClient, "S%d Start at T%d with lastLogIndex %d and lastLogTerm %d", rf.me, rf.currentTerm, lastLogIndex, lastLogTerm)
@@ -237,6 +263,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
+
+	// start applyLogs goroutine to send newly committed entry on each server
+	go rf.applyLogsLoop()
 
 	return rf
 }

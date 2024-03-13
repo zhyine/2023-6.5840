@@ -30,29 +30,30 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		Debug(dLog2, "S%d Receive AppendEntries from S%d at T%d.", rf.me, args.LeaderId, rf.currentTerm)
 	}
 
-	reply.Term = rf.currentTerm
-
-	Debug(dTimer, "S%d Reset election timeout.", rf.me)
-	rf.setElectionTime()
+	// AppendEntries RPC: Receiver implementation-Rule1
+	if args.Term < rf.currentTerm {
+		Debug(dTerm, "S%d Reject the AppendEntries from S%d at T%d, since leader's term is lower.", rf.me, args.LeaderId, rf.currentTerm)
+		reply.Success = false
+		reply.Term = rf.currentTerm
+		return
+	}
 
 	// Rules for Servers: All Servers-Rule2
 	rf.checkTerm(args.Term)
 
 	// Rules for Servers: Candidates-Rule3
-	if rf.state == CANDIDATE && rf.currentTerm < args.Term {
+	if rf.state == CANDIDATE && rf.currentTerm == args.Term {
 		Debug(dLog2, "S%d Convert from candidate to follower at T%d.", rf.me, rf.currentTerm)
 		rf.state = FOLLOWER
 	}
 
-	// AppendEntries RPC: Receiver implementation-Rule1
-	if args.Term < rf.currentTerm {
-		Debug(dTerm, "S%d Reject the AppendEntries from S%d at T%d, since leader's term is lower.", rf.me, args.LeaderId, rf.currentTerm)
-		reply.Success = false
-		return
-	}
+	Debug(dTimer, "S%d Reset election timeout.", rf.me)
+	rf.setElectionTime()
+
+	reply.Term = rf.currentTerm
 
 	// AppendEntries RPC: Receiver implementation-Rule2
-	if rf.getLogEntry(args.PrevLogIndex).Term != args.PrevLogTerm {
+	if args.PrevLogTerm == -1 || rf.getLogEntry(args.PrevLogIndex).Term != args.PrevLogTerm {
 		Debug(dLog2, "S%d PrevLogEntries do not match. Ask leader to retry.", rf.me)
 		reply.Success = false
 		return
@@ -61,7 +62,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// AppendEntries RPC: Receiver implementation-Rule3
 	for i, entry := range args.Entries {
 		if rf.getLogEntry(args.PrevLogIndex+i+1).Term != entry.Term {
-			rf.log = append(rf.getLogSlice(1, i+1+args.PrevLogIndex), args.Entries...)
+			rf.log = append(rf.getLogSlice(1, i+1+args.PrevLogIndex), args.Entries[i:]...)
 			break
 		}
 	}
@@ -83,10 +84,10 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 }
 
 func (rf *Raft) sendEntries(isHeartbeat bool) {
-	Debug(dTimer, "S%d Reset heartbeat timeout.")
+	Debug(dTimer, "S%d Reset Heartbeat Timeout.", rf.me)
 	rf.setHeartbeatTime()
 
-	Debug(dTimer, "S%d Reset election timeout.")
+	Debug(dTimer, "S%d Reset Election Timeout.", rf.me)
 	rf.setElectionTime()
 
 	for peer := range rf.peers {
@@ -104,9 +105,16 @@ func (rf *Raft) sendEntries(isHeartbeat bool) {
 			LeaderCommit: rf.commitIndex,
 		}
 
-		if isHeartbeat {
+		// Rules for Servers: Leaders-Rule3
+		// If last log index >= nextIndex for a follower: send AppendEntries RPC with log entries starting at nextIndex
+		lastLogIndex, _ := rf.getLastLogInfo()
+		if lastLogIndex >= nextIndex {
+			args.Entries = rf.getLogSlice(nextIndex, lastLogIndex+1)
+			Debug(dLog, "S%d Send AppendEntries to S%d at T%d. PrevLogIndex: %d, PrevLogTerm: %d, LeaderCommit: %d, Entries: %v.", rf.me, peer, rf.currentTerm, args.PrevLogIndex, args.PrevLogTerm, args.LeaderCommit, args.Entries)
+			go rf.leaderSendAppendEntries(peer, args)
+		} else if isHeartbeat {
 			args.Entries = make([]LogEntry, 0)
-			Debug(dLog, "S%d Send heartbeat to S%d at T%d. PrevLogIndex: %d, PrevLogTerm: %d, LeaderCommit: %d.", rf.me, peer, rf.currentTerm, args.PrevLogIndex, args.PrevLogTerm, args.LeaderCommit)
+			Debug(dLog, "S%d Send Heartbeat to S%d at T%d. PrevLogIndex: %d, PrevLogTerm: %d, LeaderCommit: %d.", rf.me, peer, rf.currentTerm, args.PrevLogIndex, args.PrevLogTerm, args.LeaderCommit)
 			go rf.leaderSendAppendEntries(peer, args)
 		}
 	}
@@ -120,13 +128,13 @@ func (rf *Raft) leaderSendAppendEntries(server int, args *AppendEntriesArgs) {
 
 		Debug(dLog, "S%d Receive AppendEntries reply from S%d at T%d.", rf.me, server, rf.currentTerm)
 
-		// Rules for Servers: All Servers-Rule2
-		if rf.checkTerm(reply.Term) {
+		if args.Term != rf.currentTerm {
+			Debug(dWarn, "S%d Term has changed after the AppendEntries, reply was discarded."+"args.Term: %d, rf.currentTerm: %d", rf.me, args.Term, rf.currentTerm)
 			return
 		}
 
-		if args.Term != rf.currentTerm {
-			Debug(dWarn, "S%d Term has changed after the AppendEntries, reply was discarded."+"args.Term: %d, rf.currentTerm: %d", rf.me, args.Term, rf.currentTerm)
+		// Rules for Servers: All Servers-Rule2
+		if rf.checkTerm(reply.Term) {
 			return
 		}
 
@@ -138,6 +146,27 @@ func (rf *Raft) leaderSendAppendEntries(server int, args *AppendEntriesArgs) {
 			newMatchIndex := args.PrevLogIndex + len(args.Entries)
 			rf.nextIndex[server] = max(newNextIndex, rf.nextIndex[server])
 			rf.matchIndex[server] = max(newMatchIndex, rf.matchIndex[server])
+
+			// All for Servers: Leaders-Rule4
+			// If there exits an N such that N > commitIndex, a majority of mathchIndex[i] >= N, and log[N].term == currentTerm: set commitIndex
+			for N := len(rf.log); N > rf.commitIndex && rf.getLogEntry(N).Term == rf.currentTerm; N-- {
+				count := 1
+				for peer, matchIndex := range rf.matchIndex {
+					if peer == rf.me {
+						continue
+					}
+
+					if matchIndex >= N {
+						count++
+					}
+				}
+
+				if count > len(rf.peers)/2 {
+					rf.commitIndex = N
+					Debug(dCommit, "S%d Update commitIndex at T%d for majority consensus. commitIndex: %d.", rf.me, rf.currentTerm, rf.commitIndex)
+					break
+				}
+			}
 		} else {
 			if rf.nextIndex[server] > 1 {
 				rf.nextIndex[server]--
@@ -145,16 +174,18 @@ func (rf *Raft) leaderSendAppendEntries(server int, args *AppendEntriesArgs) {
 
 			lastLogIndex, _ := rf.getLastLogInfo()
 			nextIndex := rf.nextIndex[server]
-			newArgs := &AppendEntriesArgs{
-				Term:         rf.currentTerm,
-				LeaderId:     rf.me,
-				PrevLogIndex: nextIndex - 1,
-				PrevLogTerm:  rf.getLogEntry(nextIndex - 1).Term,
-				Entries:      rf.getLogSlice(nextIndex, lastLogIndex+1),
-				LeaderCommit: rf.commitIndex,
+			if lastLogIndex >= nextIndex {
+				Debug(dLog, "S%d Inconsistent log, retrying.", rf.me)
+				newArgs := &AppendEntriesArgs{
+					Term:         rf.currentTerm,
+					LeaderId:     rf.me,
+					PrevLogIndex: nextIndex - 1,
+					PrevLogTerm:  rf.getLogEntry(nextIndex - 1).Term,
+					Entries:      rf.getLogSlice(nextIndex, lastLogIndex+1),
+					LeaderCommit: rf.commitIndex,
+				}
+				go rf.leaderSendAppendEntries(server, newArgs)
 			}
-
-			go rf.leaderSendAppendEntries(server, newArgs)
 		}
 	}
 }

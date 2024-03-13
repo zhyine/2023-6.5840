@@ -26,3 +26,28 @@ func (rf *Raft) ticker() {
 		time.Sleep(time.Duration(TICKINTERVAL) * time.Millisecond)
 	}
 }
+
+func (rf *Raft) applyLogsLoop() {
+	for rf.killed() == false {
+		rf.mu.Lock()
+
+		applyMsg := []ApplyMsg{}
+		for rf.commitIndex > rf.lastApplied {
+			rf.lastApplied++
+			applyMsg = append(applyMsg, ApplyMsg{
+				CommandValid: true,
+				Command:      rf.getLogEntry(rf.lastApplied).Command,
+				CommandIndex: rf.lastApplied,
+			})
+			Debug(dLog2, "S%d Apply log at T%d. lastApplied: %d, commitIndex: %d", rf.me, rf.currentTerm, rf.lastApplied, rf.commitIndex)
+		}
+
+		rf.mu.Unlock()
+
+		for _, msg := range applyMsg {
+			rf.applyCh <- msg
+		}
+
+		time.Sleep(time.Duration(10) * time.Millisecond)
+	}
+}
