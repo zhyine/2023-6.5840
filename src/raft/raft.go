@@ -194,7 +194,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index = len(rf.log)
 	term = rf.currentTerm
 
-	Debug(dLog, "S%d Add the command at T%d. lastLogIndex: %d, lastLogTerm: %d.", rf.me, rf.currentTerm, index, term)
+	Debug(dLog, "S%d Add the command at T%d. rf.lastLogIndex: %d, rf.lastLogTerm: %d.", rf.me, rf.currentTerm, index, term)
 
 	rf.sendEntries(false)
 

@@ -47,7 +47,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.state = FOLLOWER
 	}
 
-	Debug(dTimer, "S%d Reset election timeout.", rf.me)
+	Debug(dTimer, "S%d Reset Election Timeout.", rf.me)
 	rf.setElectionTime()
 
 	reply.Term = rf.currentTerm
@@ -69,11 +69,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// AppendEntries RPC: Receiver implementation-Rule5
 	if args.LeaderCommit > rf.commitIndex {
-		Debug(dCommit, "S%d Get higher commitIndex from S%d at T%d, updating commitIndex. commitIndex: %d, LeaderCommit: %d",
+		Debug(dCommit, "S%d Get higher commitIndex from S%d at T%d, updating commitIndex. rf.commitIndex: %d, args.LeaderCommit: %d",
 			rf.me, args.LeaderId, rf.currentTerm, rf.commitIndex, args.LeaderCommit)
 		rf.commitIndex = min(args.LeaderCommit, args.PrevLogIndex+len(args.Entries))
-		Debug(dCommit, "S%d Updated commitIndex at T%d. CI: %d.", rf.me, rf.currentTerm, rf.commitIndex)
+		Debug(dCommit, "S%d Update commitIndex at T%d. rf.commitIndex: %d.", rf.me, rf.currentTerm, rf.commitIndex)
 	}
+
+	Debug(dLog2, "S%d Append entries success. Entries: %v", rf.me, args.Entries)
 
 	reply.Success = true
 }
@@ -90,13 +92,13 @@ func (rf *Raft) sendEntries(isHeartbeat bool) {
 	Debug(dTimer, "S%d Reset Election Timeout.", rf.me)
 	rf.setElectionTime()
 
+	lastLogIndex, _ := rf.getLastLogInfo()
 	for peer := range rf.peers {
 		if peer == rf.me {
 			continue
 		}
 
 		nextIndex := rf.nextIndex[peer]
-
 		args := &AppendEntriesArgs{
 			Term:         rf.currentTerm,
 			LeaderId:     rf.me,
@@ -107,14 +109,13 @@ func (rf *Raft) sendEntries(isHeartbeat bool) {
 
 		// Rules for Servers: Leaders-Rule3
 		// If last log index >= nextIndex for a follower: send AppendEntries RPC with log entries starting at nextIndex
-		lastLogIndex, _ := rf.getLastLogInfo()
 		if lastLogIndex >= nextIndex {
 			args.Entries = rf.getLogSlice(nextIndex, lastLogIndex+1)
-			Debug(dLog, "S%d Send AppendEntries to S%d at T%d. PrevLogIndex: %d, PrevLogTerm: %d, LeaderCommit: %d, Entries: %v.", rf.me, peer, rf.currentTerm, args.PrevLogIndex, args.PrevLogTerm, args.LeaderCommit, args.Entries)
+			Debug(dLog, "S%d Send AppendEntries to S%d at T%d. args.PrevLogIndex: %d, args.PrevLogTerm: %d, args.LeaderCommit: %d, args.Entries: %v.", rf.me, peer, rf.currentTerm, args.PrevLogIndex, args.PrevLogTerm, args.LeaderCommit, args.Entries)
 			go rf.leaderSendAppendEntries(peer, args)
 		} else if isHeartbeat {
 			args.Entries = make([]LogEntry, 0)
-			Debug(dLog, "S%d Send Heartbeat to S%d at T%d. PrevLogIndex: %d, PrevLogTerm: %d, LeaderCommit: %d.", rf.me, peer, rf.currentTerm, args.PrevLogIndex, args.PrevLogTerm, args.LeaderCommit)
+			Debug(dLog, "S%d Send Heartbeat to S%d at T%d. args.PrevLogIndex: %d, args.PrevLogTerm: %d, args.LeaderCommit: %d.", rf.me, peer, rf.currentTerm, args.PrevLogIndex, args.PrevLogTerm, args.LeaderCommit)
 			go rf.leaderSendAppendEntries(peer, args)
 		}
 	}
@@ -122,11 +123,17 @@ func (rf *Raft) sendEntries(isHeartbeat bool) {
 
 func (rf *Raft) leaderSendAppendEntries(server int, args *AppendEntriesArgs) {
 	reply := &AppendEntriesReply{}
-	if rf.sendAppendEntries(server, args, reply) {
+	ok := rf.sendAppendEntries(server, args, reply)
+	if ok {
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
 
 		Debug(dLog, "S%d Receive AppendEntries reply from S%d at T%d.", rf.me, server, rf.currentTerm)
+
+		// if reply.Term < rf.currentTerm {
+		// 	Debug(dLog, "S%d Term lower, invalid AppendEntries reply. reply.Term: %d, rf.currentTerm: %d", rf.me, reply.Term, rf.currentTerm)
+		// 	return
+		// }
 
 		if args.Term != rf.currentTerm {
 			Debug(dWarn, "S%d Term has changed after the AppendEntries, reply was discarded."+"args.Term: %d, rf.currentTerm: %d", rf.me, args.Term, rf.currentTerm)
@@ -163,7 +170,7 @@ func (rf *Raft) leaderSendAppendEntries(server int, args *AppendEntriesArgs) {
 
 				if count > len(rf.peers)/2 {
 					rf.commitIndex = N
-					Debug(dCommit, "S%d Update commitIndex at T%d for majority consensus. commitIndex: %d.", rf.me, rf.currentTerm, rf.commitIndex)
+					Debug(dCommit, "S%d Update commitIndex at T%d for majority consensus. rf.commitIndex: %d.", rf.me, rf.currentTerm, rf.commitIndex)
 					break
 				}
 			}

@@ -40,6 +40,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	// Rules for Servers: All Servers-Rule2
 	rf.checkTerm(args.Term)
+
 	reply.Term = rf.currentTerm
 
 	// RequestVote RPC: Receiver implementation-Rule2
@@ -124,6 +125,7 @@ func (rf *Raft) startElection() {
 		if peer == rf.me {
 			continue
 		}
+		Debug(dVote, "S%d Send RequestVote to S%d at T%d", rf.me, peer, rf.currentTerm)
 		go rf.candidateSendRequsetVotes(peer, args, &voteCount, &once)
 	}
 
@@ -134,10 +136,15 @@ func (rf *Raft) candidateSendRequsetVotes(server int, args *RequestVoteArgs, vot
 	if rf.sendRequestVote(server, args, reply) {
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
-		Debug(dVote, "S%d Receive request reply from S%d at T%d", rf.me, server, rf.currentTerm)
+		Debug(dVote, "S%d Receive RequestVote reply from S%d at T%d", rf.me, server, rf.currentTerm)
+
+		// if reply.Term < rf.currentTerm {
+		// 	Debug(dLog, "S%d Term lower, invalid RequestVote reply. reply.Term: %d, rf.currentTerm: %d", rf.me, reply.Term, rf.currentTerm)
+		// 	return
+		// }
 
 		if args.Term != rf.currentTerm {
-			Debug(dWarn, "S%d Term has changed after the RequestVote, reply was discarded."+"args.Term: %d, rf.currentTerm: %d", rf.me, args.Term, rf.currentTerm)
+			Debug(dWarn, "S%d Term has changed after sending RequestVote, reply was discarded."+"args.Term: %d, rf.currentTerm: %d", rf.me, args.Term, rf.currentTerm)
 			return
 		}
 
@@ -151,12 +158,14 @@ func (rf *Raft) candidateSendRequsetVotes(server int, args *RequestVoteArgs, vot
 			if *voteCount > len(rf.peers)/2 {
 				once.Do(func() {
 					Debug(dLeader, "S%d Receive majority votes at T%d, become leader.", rf.me, rf.currentTerm)
+
 					rf.state = LEADER
 					lastLogIndex, _ := rf.getLastLogInfo()
 					for peer := range rf.peers {
 						rf.nextIndex[peer] = lastLogIndex + 1
 						rf.matchIndex[peer] = 0
 					}
+
 					// Rules for Servers: Leaders-Rule1
 					// Upon election: send initial empty AppendEntries RPCs (heartbeat) to each server
 					rf.sendEntries(true)

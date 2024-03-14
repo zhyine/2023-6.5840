@@ -38,7 +38,7 @@ func (rf *Raft) getLastLogInfo() (lastLogIndex int, lastLogTerm int) {
 
 func (rf *Raft) getLogSlice(start, end int) []LogEntry {
 	logs := rf.log
-	return logs[start-1 : end-1]
+	return append([]LogEntry{}, logs[start-1:end-1]...)
 }
 
 func (rf *Raft) setElectionTime() {
