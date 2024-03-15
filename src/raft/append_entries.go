@@ -12,6 +12,11 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term    int  // currentTerm, for leader to update itself
 	Success bool // true if follower contained entry matching prevLogIndex and prevLogTerm
+
+	// 2C
+	XTerm  int // term in the conflicting entry
+	XIndex int // index of first entry with that term
+	XLen   int // log length
 }
 
 // AppendEntries RPC: Receiver implementation
@@ -56,6 +61,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.PrevLogTerm == -1 || rf.getLogEntry(args.PrevLogIndex).Term != args.PrevLogTerm {
 		Debug(dLog2, "S%d PrevLogEntries do not match. Ask leader to retry.", rf.me)
 		reply.Success = false
+		reply.XTerm = rf.getLogEntry(args.PrevLogIndex).Term
+		reply.XIndex, _, _ = rf.getIndexBoundaryWithTerm(reply.XTerm)
+		reply.XLen = len(rf.log)
 		return
 	}
 
@@ -63,6 +71,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	for i, entry := range args.Entries {
 		if rf.getLogEntry(args.PrevLogIndex+i+1).Term != entry.Term {
 			rf.log = append(rf.getLogSlice(1, i+1+args.PrevLogIndex), args.Entries[i:]...)
+			rf.persist()
 			break
 		}
 	}
@@ -130,11 +139,6 @@ func (rf *Raft) leaderSendAppendEntries(server int, args *AppendEntriesArgs) {
 
 		Debug(dLog, "S%d Receive AppendEntries reply from S%d at T%d.", rf.me, server, rf.currentTerm)
 
-		// if reply.Term < rf.currentTerm {
-		// 	Debug(dLog, "S%d Term lower, invalid AppendEntries reply. reply.Term: %d, rf.currentTerm: %d", rf.me, reply.Term, rf.currentTerm)
-		// 	return
-		// }
-
 		if args.Term != rf.currentTerm {
 			Debug(dWarn, "S%d Term has changed after the AppendEntries, reply was discarded."+"args.Term: %d, rf.currentTerm: %d", rf.me, args.Term, rf.currentTerm)
 			return
@@ -175,8 +179,22 @@ func (rf *Raft) leaderSendAppendEntries(server int, args *AppendEntriesArgs) {
 				}
 			}
 		} else {
-			if rf.nextIndex[server] > 1 {
-				rf.nextIndex[server]--
+			// if rf.nextIndex[server] > 1 {
+			// 	rf.nextIndex[server]--
+			// }
+
+			if reply.XTerm == -1 {
+				// follower's log is too short
+				rf.nextIndex[server] = reply.XLen + 1
+			} else {
+				_, end, ok := rf.getIndexBoundaryWithTerm(reply.XTerm)
+				if ok {
+					// leader has XTerm
+					rf.nextIndex[server] = end
+				} else {
+					// leader doesn't have XTerm
+					rf.nextIndex[server] = reply.XIndex
+				}
 			}
 
 			lastLogIndex, _ := rf.getLastLogInfo()

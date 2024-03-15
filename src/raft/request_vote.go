@@ -53,6 +53,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			reply.VoteGranted = true
 			rf.votedFor = args.CandidateId
 
+			rf.persist()
+
 			Debug(dTerm, "S%d Reset election timeout.", rf.me)
 			rf.setElectionTime()
 		} else {
@@ -107,6 +109,9 @@ func (rf *Raft) startElection() {
 	Debug(dTerm, "S%d Start a new term, which is T%d", rf.me, rf.currentTerm)
 	rf.state = CANDIDATE
 	rf.votedFor = rf.me
+
+	rf.persist()
+
 	rf.setElectionTime()
 	Debug(dTimer, "S%d Reset election timeout.", rf.me)
 
@@ -137,11 +142,6 @@ func (rf *Raft) candidateSendRequsetVotes(server int, args *RequestVoteArgs, vot
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
 		Debug(dVote, "S%d Receive RequestVote reply from S%d at T%d", rf.me, server, rf.currentTerm)
-
-		// if reply.Term < rf.currentTerm {
-		// 	Debug(dLog, "S%d Term lower, invalid RequestVote reply. reply.Term: %d, rf.currentTerm: %d", rf.me, reply.Term, rf.currentTerm)
-		// 	return
-		// }
 
 		if args.Term != rf.currentTerm {
 			Debug(dWarn, "S%d Term has changed after sending RequestVote, reply was discarded."+"args.Term: %d, rf.currentTerm: %d", rf.me, args.Term, rf.currentTerm)

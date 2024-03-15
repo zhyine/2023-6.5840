@@ -63,9 +63,25 @@ func (rf *Raft) checkTerm(term int) bool {
 		rf.state = FOLLOWER
 		rf.currentTerm = term
 		rf.votedFor = -1
+		rf.persist()
 		return true
 	}
 	return false
+}
+
+func (rf *Raft) getIndexBoundaryWithTerm(term int) (int, int, bool) {
+	logs := rf.log
+	start, end := len(logs), -1
+	for i := 1; i <= len(logs); i++ {
+		if rf.getLogEntry(i).Term == term {
+			start = min(start, i)
+			end = max(end, i)
+		}
+	}
+	if end == -1 {
+		return -1, -1, false
+	}
+	return start, end, true
 }
 
 func max(a, b int) int {

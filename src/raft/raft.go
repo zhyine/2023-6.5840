@@ -20,11 +20,13 @@ package raft
 import (
 	//	"bytes"
 
+	"bytes"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	//	"6.5840/labgob"
+	"6.5840/labgob"
 	"6.5840/labrpc"
 )
 
@@ -126,6 +128,14 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// raftstate := w.Bytes()
 	// rf.persister.Save(raftstate, nil)
+	Debug(dPersist, "S%d Save persistent state to stable storage at T%d", rf.me, rf.currentTerm)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	raftstate := w.Bytes()
+	rf.persister.Save(raftstate, nil)
 }
 
 // restore previously persisted state.
@@ -146,6 +156,22 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+	Debug(dPersist, "S%d Restore previously persisted state at T%d", rf.me, rf.currentTerm)
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+
+	var currentTerm int
+	var votedFor int
+	var log []LogEntry
+
+	if d.Decode(&currentTerm) != nil || d.Decode(&votedFor) != nil || d.Decode(&log) != nil {
+		Debug(dError, "S%d Raft.readPersist: fial to decode.", rf.me)
+	} else {
+		rf.currentTerm = currentTerm
+		rf.votedFor = votedFor
+		rf.log = log
+	}
+
 }
 
 // the service says it has created a snapshot that has
@@ -193,6 +219,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	index = len(rf.log)
 	term = rf.currentTerm
+
+	rf.persist()
 
 	Debug(dLog, "S%d Add the command at T%d. rf.lastLogIndex: %d, rf.lastLogTerm: %d.", rf.me, rf.currentTerm, index, term)
 
@@ -249,17 +277,18 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
-	for peer := range rf.peers {
-		rf.nextIndex[peer] = 1
-	}
 
 	rf.applyCh = applyCh
 
-	lastLogIndex, lastLogTerm := rf.getLastLogInfo()
-	Debug(dClient, "S%d Start at T%d with lastLogIndex %d and lastLogTerm %d", rf.me, rf.currentTerm, lastLogIndex, lastLogTerm)
-
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+
+	for peer := range rf.peers {
+		rf.nextIndex[peer] = len(rf.log) + 1
+	}
+
+	lastLogIndex, lastLogTerm := rf.getLastLogInfo()
+	Debug(dClient, "S%d Start at T%d with lastLogIndex %d and lastLogTerm %d", rf.me, rf.currentTerm, lastLogIndex, lastLogTerm)
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
