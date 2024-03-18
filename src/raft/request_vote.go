@@ -30,7 +30,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	Debug(dVote, "S%d Receive RequestVote from S%d at T%d.", rf.me, args.CandidateId, rf.currentTerm)
 
-	// RequestVote RPC: Receiver implementation-Rule1
+	// Reply false if term < currentTerm
 	if args.Term < rf.currentTerm {
 		Debug(dTerm, "S%d Reject the RequestVote from S%d at T%d, since Candidate's term is lower.", rf.me, args.CandidateId, rf.currentTerm)
 		reply.VoteGranted = false
@@ -43,7 +43,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	reply.Term = rf.currentTerm
 
-	// RequestVote RPC: Receiver implementation-Rule2
+	// If votedFor is null or candidated, and candidate's log is at least up-to-date receiver's log, grant vote
 	lastLogIndex, lastLogTerm := rf.getLastLogInfo()
 	if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
 		// Raft determines which of tow logs is more up-to-date by comparing the index and term of the last entries in the logs (§5.4)
@@ -112,8 +112,8 @@ func (rf *Raft) startElection() {
 
 	rf.persist()
 
-	rf.setElectionTime()
 	Debug(dTimer, "S%d Reset election timeout.", rf.me)
+	rf.setElectionTime()
 
 	lastLogIndex, lastLogTerm := rf.getLastLogInfo()
 	args := &RequestVoteArgs{
@@ -131,12 +131,12 @@ func (rf *Raft) startElection() {
 			continue
 		}
 		Debug(dVote, "S%d Send RequestVote to S%d at T%d", rf.me, peer, rf.currentTerm)
-		go rf.candidateSendRequsetVotes(peer, args, &voteCount, &once)
+		go rf.candidateSendRequsetVote(peer, args, &voteCount, &once)
 	}
 
 }
 
-func (rf *Raft) candidateSendRequsetVotes(server int, args *RequestVoteArgs, voteCount *int, once *sync.Once) {
+func (rf *Raft) candidateSendRequsetVote(server int, args *RequestVoteArgs, voteCount *int, once *sync.Once) {
 	reply := &RequestVoteReply{}
 	if rf.sendRequestVote(server, args, reply) {
 		rf.mu.Lock()

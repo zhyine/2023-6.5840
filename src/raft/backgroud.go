@@ -31,17 +31,31 @@ func (rf *Raft) applyLogsLoop() {
 	for rf.killed() == false {
 		rf.mu.Lock()
 
-		applyMsg := []ApplyMsg{}
-		for rf.commitIndex > rf.lastApplied {
-			rf.lastApplied++
-			applyMsg = append(applyMsg, ApplyMsg{
-				CommandValid: true,
-				Command:      rf.getLogEntry(rf.lastApplied).Command,
-				CommandIndex: rf.lastApplied,
-			})
-			Debug(dLog2, "S%d Apply log at T%d. lastApplied: %d, commitIndex: %d", rf.me, rf.currentTerm, rf.lastApplied, rf.commitIndex)
-		}
+		var applyMsg []ApplyMsg
 
+		rf.lastApplied = max(rf.lastApplied, rf.lastIncludedIndex)
+
+		if rf.waitingSnapshot != nil {
+			applyMsg = append(applyMsg, ApplyMsg{
+				SnapshotValid: true,
+				Snapshot:      rf.waitingSnapshot,
+				SnapshotTerm:  rf.waitingTerm,
+				SnapshotIndex: rf.waitingIndex,
+			})
+			rf.waitingSnapshot = nil
+		} else {
+			// Rules for Servers: All Servers
+			// If commitIndex > lastApplied: increment lastApplied, apply log[lastApplied] to state machine
+			for rf.commitIndex > rf.lastApplied {
+				rf.lastApplied++
+				applyMsg = append(applyMsg, ApplyMsg{
+					CommandValid: true,
+					Command:      rf.getLogEntry(rf.lastApplied).Command,
+					CommandIndex: rf.lastApplied,
+				})
+				Debug(dLog2, "S%d Apply log at T%d. rf.lastApplied: %d, rf.commitIndex: %d", rf.me, rf.currentTerm, rf.lastApplied, rf.commitIndex)
+			}
+		}
 		rf.mu.Unlock()
 
 		for _, msg := range applyMsg {

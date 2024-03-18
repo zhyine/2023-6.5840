@@ -6,3 +6,5 @@ api.key
 .DS_Store
 
 *.log
+
+.idea/*

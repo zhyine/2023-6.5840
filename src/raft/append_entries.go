@@ -35,10 +35,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		Debug(dLog2, "S%d Receive AppendEntries from S%d at T%d.", rf.me, args.LeaderId, rf.currentTerm)
 	}
 
-	// AppendEntries RPC: Receiver implementation-Rule1
+	reply.Success = false
+
+	// Reply false if term < currentTerm
 	if args.Term < rf.currentTerm {
 		Debug(dTerm, "S%d Reject the AppendEntries from S%d at T%d, since leader's term is lower.", rf.me, args.LeaderId, rf.currentTerm)
-		reply.Success = false
 		reply.Term = rf.currentTerm
 		return
 	}
@@ -46,41 +47,67 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// Rules for Servers: All Servers-Rule2
 	rf.checkTerm(args.Term)
 
-	// Rules for Servers: Candidates-Rule3
-	if rf.state == CANDIDATE && rf.currentTerm == args.Term {
-		Debug(dLog2, "S%d Convert from candidate to follower at T%d.", rf.me, rf.currentTerm)
-		rf.state = FOLLOWER
-	}
+	rf.leaderId = args.LeaderId
 
 	Debug(dTimer, "S%d Reset Election Timeout.", rf.me)
 	rf.setElectionTime()
 
 	reply.Term = rf.currentTerm
 
-	// AppendEntries RPC: Receiver implementation-Rule2
+	// Rules for Servers: Candidates-Rule3
+	// If AppendEntries RPC received from new leader: convert to follower
+	if rf.state == CANDIDATE && rf.currentTerm == args.Term {
+		Debug(dLog2, "S%d Convert from candidate to follower at T%d.", rf.me, rf.currentTerm)
+		rf.state = FOLLOWER
+	}
+
+	if args.PrevLogIndex < rf.lastIncludedIndex {
+		alreadySnapshotLogLen := rf.lastIncludedIndex - args.PrevLogIndex
+		if alreadySnapshotLogLen <= len(args.Entries) {
+			newArgs := &AppendEntriesArgs{
+				Term:         args.Term,
+				LeaderId:     args.LeaderId,
+				PrevLogTerm:  rf.lastIncludedTerm,
+				PrevLogIndex: rf.lastIncludedIndex,
+				Entries:      args.Entries[alreadySnapshotLogLen:],
+				LeaderCommit: args.LeaderCommit,
+			}
+			args = newArgs
+			Debug(dWarn, "S%d Log entry at PrevLogIndex already discarded by snapshot, readjusting. args.PrevLogIndex: %d, rf.lastIncludedIndex:%d, args.Entries: %v.",
+				rf.me, args.PrevLogIndex, args.Entries)
+		} else {
+			Debug(dWarn, "S%d Log entry at PrevLogIndex already discarded by snapshot, assume as a match. args.PrevLogIndex: %d.", rf.me, args.PrevLogIndex)
+			reply.Success = true
+			return
+		}
+	}
+
+	// Reply false if log doesn't contain an entry at prevLogIndx whose term matches prevLogTerm
 	if args.PrevLogTerm == -1 || rf.getLogEntry(args.PrevLogIndex).Term != args.PrevLogTerm {
 		Debug(dLog2, "S%d PrevLogEntries do not match. Ask leader to retry.", rf.me)
 		reply.Success = false
 		reply.XTerm = rf.getLogEntry(args.PrevLogIndex).Term
-		reply.XIndex, _, _ = rf.getIndexBoundaryWithTerm(reply.XTerm)
-		reply.XLen = len(rf.log)
+		reply.XIndex, _ = rf.getIndexBoundaryWithTerm(reply.XTerm)
+		reply.XLen = len(rf.log) + rf.lastIncludedIndex
 		return
 	}
 
-	// AppendEntries RPC: Receiver implementation-Rule3
+	// If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it
 	for i, entry := range args.Entries {
 		if rf.getLogEntry(args.PrevLogIndex+i+1).Term != entry.Term {
-			rf.log = append(rf.getLogSlice(1, i+1+args.PrevLogIndex), args.Entries[i:]...)
+			rf.log = append(rf.getLogSlice(1+rf.lastIncludedIndex, i+1+args.PrevLogIndex), args.Entries[i:]...)
 			rf.persist()
 			break
 		}
 	}
 
-	// AppendEntries RPC: Receiver implementation-Rule5
+	// If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
 	if args.LeaderCommit > rf.commitIndex {
 		Debug(dCommit, "S%d Get higher commitIndex from S%d at T%d, updating commitIndex. rf.commitIndex: %d, args.LeaderCommit: %d",
 			rf.me, args.LeaderId, rf.currentTerm, rf.commitIndex, args.LeaderCommit)
+
 		rf.commitIndex = min(args.LeaderCommit, args.PrevLogIndex+len(args.Entries))
+
 		Debug(dCommit, "S%d Update commitIndex at T%d. rf.commitIndex: %d.", rf.me, rf.currentTerm, rf.commitIndex)
 	}
 
@@ -108,6 +135,12 @@ func (rf *Raft) sendEntries(isHeartbeat bool) {
 		}
 
 		nextIndex := rf.nextIndex[peer]
+
+		if nextIndex <= rf.lastIncludedIndex {
+			rf.sendSnapshot(peer)
+			continue
+		}
+
 		args := &AppendEntriesArgs{
 			Term:         rf.currentTerm,
 			LeaderId:     rf.me,
@@ -160,7 +193,7 @@ func (rf *Raft) leaderSendAppendEntries(server int, args *AppendEntriesArgs) {
 
 			// All for Servers: Leaders-Rule4
 			// If there exits an N such that N > commitIndex, a majority of mathchIndex[i] >= N, and log[N].term == currentTerm: set commitIndex
-			for N := len(rf.log); N > rf.commitIndex && rf.getLogEntry(N).Term == rf.currentTerm; N-- {
+			for N := len(rf.log) + rf.lastIncludedIndex; N > rf.commitIndex && rf.getLogEntry(N).Term == rf.currentTerm; N-- {
 				count := 1
 				for peer, matchIndex := range rf.matchIndex {
 					if peer == rf.me {
@@ -187,8 +220,8 @@ func (rf *Raft) leaderSendAppendEntries(server int, args *AppendEntriesArgs) {
 				// follower's log is too short
 				rf.nextIndex[server] = reply.XLen + 1
 			} else {
-				_, end, ok := rf.getIndexBoundaryWithTerm(reply.XTerm)
-				if ok {
+				_, end := rf.getIndexBoundaryWithTerm(reply.XTerm)
+				if end != -1 {
 					// leader has XTerm
 					rf.nextIndex[server] = end
 				} else {
@@ -199,7 +232,10 @@ func (rf *Raft) leaderSendAppendEntries(server int, args *AppendEntriesArgs) {
 
 			lastLogIndex, _ := rf.getLastLogInfo()
 			nextIndex := rf.nextIndex[server]
-			if lastLogIndex >= nextIndex {
+
+			if nextIndex <= rf.lastIncludedIndex {
+				rf.sendSnapshot(server)
+			} else if lastLogIndex >= nextIndex {
 				Debug(dLog, "S%d Inconsistent log, retrying.", rf.me)
 				newArgs := &AppendEntriesArgs{
 					Term:         rf.currentTerm,

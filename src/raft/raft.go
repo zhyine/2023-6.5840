@@ -91,7 +91,7 @@ type Raft struct {
 	votedFor    int        // candidateId that received vote in current term
 	log         []LogEntry // each entry contains command for state machine, and term when entry was received by leaders (first index is 1)
 
-	// Volatile state on all servers
+	// Volatile state on all serversP
 	commitIndex int // index of highest log entry known to be committed (initialized to 0)
 	lastApplied int // index of highest log entry applied to state machine (initialized to 0)
 
@@ -100,7 +100,19 @@ type Raft struct {
 	matchIndex []int // for each server, index of highest log entry known to be replicated on server (initialized to 0)
 
 	// 2B
-	applyCh chan ApplyMsg
+	applyCh chan ApplyMsg // a channel on which the tester or service expects Raft to send ApplyMsg messages.
+
+	// 2D
+	leaderId int // follower can redirect clients
+
+	snapshot          []byte // the snapshot stored in memory, which will be send by InstallSnapshot RPC
+	lastIncludedIndex int    // the snapshot replaces all entries up through and including this index
+	lastIncludedTerm  int    // term of lastIncludedIndex
+
+	// snapshot buffer
+	waitingIndex    int    // lastIncludedIndex to be sent to applyCh
+	waitingTerm     int    // lastIncludedTerm to be sent to applyCh
+	waitingSnapshot []byte // snapshot to be sent to applyCh
 }
 
 // return currentTerm and whether this server
@@ -134,8 +146,10 @@ func (rf *Raft) persist() {
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.votedFor)
 	e.Encode(rf.log)
+	e.Encode(rf.lastIncludedIndex)
+	e.Encode(rf.lastIncludedTerm)
 	raftstate := w.Bytes()
-	rf.persister.Save(raftstate, nil)
+	rf.persister.Save(raftstate, rf.snapshot)
 }
 
 // restore previously persisted state.
@@ -163,13 +177,21 @@ func (rf *Raft) readPersist(data []byte) {
 	var currentTerm int
 	var votedFor int
 	var log []LogEntry
+	var lastIncludedIndex int
+	var lastIncludedTerm int
 
-	if d.Decode(&currentTerm) != nil || d.Decode(&votedFor) != nil || d.Decode(&log) != nil {
+	if d.Decode(&currentTerm) != nil || d.Decode(&votedFor) != nil || d.Decode(&log) != nil || d.Decode(&lastIncludedIndex) != nil || d.Decode(&lastIncludedTerm) != nil {
 		Debug(dError, "S%d Raft.readPersist: fial to decode.", rf.me)
 	} else {
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
 		rf.log = log
+		rf.lastIncludedIndex = lastIncludedIndex
+		rf.lastIncludedTerm = lastIncludedTerm
+
+		rf.snapshot = rf.persister.ReadSnapshot()
+		rf.commitIndex = rf.lastIncludedIndex
+		rf.lastApplied = rf.lastIncludedIndex
 	}
 
 }
@@ -180,7 +202,31 @@ func (rf *Raft) readPersist(data []byte) {
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
+	Debug(dSnap, "S%d Trim its log, replace all entries up through and including index %d.", rf.me, index)
+
+	if rf.lastIncludedIndex >= index {
+		Debug(dSnap, "S%d Snapshot already applied to persistent.", rf.me)
+		return
+	}
+
+	if rf.commitIndex < index {
+		Debug(dWarn, "S%d Cannot snapshot uncommitted log entries, discard the call. rf.commitIndex: %d, index: %d", rf.me, rf.commitIndex, index)
+		return
+	}
+
+	lastLogIndex, _ := rf.getLastLogInfo()
+
+	newLog := rf.getLogSlice(index+1, lastLogIndex+1)
+	term := rf.getLogEntry(index).Term
+
+	rf.log = newLog
+	rf.lastIncludedIndex = index
+	rf.lastIncludedTerm = term
+	rf.snapshot = snapshot
+	rf.persist()
 }
 
 // the service using Raft (e.g. a k/v server) wants to start
@@ -217,7 +263,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	rf.log = append(rf.log, logEntry)
 
-	index = len(rf.log)
+	index = len(rf.log) + rf.lastIncludedIndex
 	term = rf.currentTerm
 
 	rf.persist()
@@ -277,15 +323,19 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
+	for peer := range rf.peers {
+		rf.nextIndex[peer] = 1
+	}
 
 	rf.applyCh = applyCh
 
+	rf.leaderId = -1
+
+	rf.lastIncludedIndex = 0
+	rf.lastIncludedTerm = 0
+
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-
-	for peer := range rf.peers {
-		rf.nextIndex[peer] = len(rf.log) + 1
-	}
 
 	lastLogIndex, lastLogTerm := rf.getLastLogInfo()
 	Debug(dClient, "S%d Start at T%d with lastLogIndex %d and lastLogTerm %d", rf.me, rf.currentTerm, lastLogIndex, lastLogTerm)
